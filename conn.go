@@ -102,9 +102,16 @@ type Conn struct {
 	buffering bool         // whether records are buffered in sendBuf
 	sendBuf   []byte       // a buffer of records waiting to be sent
 
+	DirectMode bool
+	DirectPre  bool
+	DirectIn   bool
+	DirectOut  bool
+
 	RPRX bool
 	SHOW bool
 	MARK string
+
+	ic, oc int
 
 	fall  bool
 	total int
@@ -696,10 +703,15 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 			l := len(data)
 			if c.total == 0 && typ == 23 && l >= 5 {
 				if c.vers == 772 {
+					c.ic++
 					if data[0] == 23 && data[1] == 3 && data[2] == 3 {
 						if (int(data[3])<<8 | int(data[4])) <= 16640 {
 							c.total = (int(data[3])<<8 | int(data[4])) + 5
+							c.ic = 0
 						}
+					}
+					if c.ic == 10 {
+						c.RPRX = false
 					}
 				} else {
 					c.RPRX = false
@@ -709,6 +721,12 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 				c.count += l
 				if c.count == c.total {
 					c.fall = true
+					if c.DirectMode {
+						c.DirectPre = true
+						if c.SHOW {
+							fmt.Println(c.MARK, "DirectPre = true")
+						}
+					}
 				} else if c.count > c.total {
 					//c.RPRX = false
 				}
@@ -1025,11 +1043,16 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 
 	if !c.taken && !c.first && typ == 23 && l >= 5 {
 		if c.vers == 772 {
+			c.oc++
 			if data[0] == 23 && data[1] == 3 && data[2] == 3 {
 				if (int(data[3])<<8 | int(data[4])) <= 16640 {
 					c.taken = true
 					c.first = true
+					c.oc = 0
 				}
+			}
+			if c.oc == 10 {
+				c.RPRX = false
 			}
 		} else {
 			c.RPRX = false
@@ -1053,6 +1076,12 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 						c.writeRecordLocked(23, data[:f])
 						c.taken = true
 						c.first = false
+						if c.DirectMode {
+							c.DirectOut = true
+							if c.SHOW {
+								fmt.Println(c.MARK, "DirectOut = true")
+							}
+						}
 					}
 					i--
 					continue
@@ -1060,6 +1089,12 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 					if c.first {
 						if c.skip == 0 {
 							c.first = false
+							if c.DirectMode {
+								c.DirectOut = true
+								if c.SHOW {
+									fmt.Println(c.MARK, "DirectOut = true")
+								}
+							}
 						}
 						goto normal
 					}
@@ -1284,6 +1319,11 @@ var (
 
 // Write writes data to the connection.
 func (c *Conn) Write(b []byte) (int, error) {
+
+	if c.DirectOut {
+		return c.conn.Write(b)
+	}
+
 	// interlock with Close below
 	for {
 		x := atomic.LoadInt32(&c.activeCall)
@@ -1444,6 +1484,27 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 // Read can be made to time out and return a net.Error with Timeout() == true
 // after a fixed time limit; see SetDeadline and SetReadDeadline.
 func (c *Conn) Read(b []byte) (int, error) {
+
+	if c.DirectIn {
+		return c.conn.Read(b)
+	}
+
+	if c.DirectPre {
+		if c.input.Len() != 0 {
+			n, _ := c.input.Read(b)
+			return n, nil
+		}
+		if c.rawInput.Len() != 0 {
+			n, _ := c.rawInput.Read(b)
+			return n, nil
+		}
+		c.DirectIn = true
+		if c.SHOW {
+			fmt.Println(c.MARK, "DirectIn = true")
+		}
+		return c.conn.Read(b)
+	}
+
 	if err := c.Handshake(); err != nil {
 		return 0, err
 	}
@@ -1488,6 +1549,11 @@ func (c *Conn) Read(b []byte) (int, error) {
 
 // Close closes the connection.
 func (c *Conn) Close() error {
+
+	if c.DirectOut {
+		return c.conn.Close()
+	}
+
 	// Interlock with Conn.Write above.
 	var x int32
 	for {
