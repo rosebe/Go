@@ -6,9 +6,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE-Go file.
 
-// TLS low level connection and record layer
+// XTLS low level connection and record layer
 
-package tls
+package xtls
 
 import (
 	"bytes"
@@ -28,7 +28,7 @@ import (
 // It implements the net.Conn interface.
 type Conn struct {
 	// constant
-	conn        net.Conn
+	Connection  net.Conn
 	isClient    bool
 	handshakeFn func() error // (*Conn).clientHandshake or serverHandshake
 
@@ -148,32 +148,32 @@ type Conn struct {
 
 // LocalAddr returns the local network address.
 func (c *Conn) LocalAddr() net.Addr {
-	return c.conn.LocalAddr()
+	return c.Connection.LocalAddr()
 }
 
 // RemoteAddr returns the remote network address.
 func (c *Conn) RemoteAddr() net.Addr {
-	return c.conn.RemoteAddr()
+	return c.Connection.RemoteAddr()
 }
 
 // SetDeadline sets the read and write deadlines associated with the connection.
 // A zero value for t means Read and Write will not time out.
 // After a Write has timed out, the TLS state is corrupt and all future writes will return the same error.
 func (c *Conn) SetDeadline(t time.Time) error {
-	return c.conn.SetDeadline(t)
+	return c.Connection.SetDeadline(t)
 }
 
 // SetReadDeadline sets the read deadline on the underlying connection.
 // A zero value for t means Read will not time out.
 func (c *Conn) SetReadDeadline(t time.Time) error {
-	return c.conn.SetReadDeadline(t)
+	return c.Connection.SetReadDeadline(t)
 }
 
 // SetWriteDeadline sets the write deadline on the underlying connection.
 // A zero value for t means Write will not time out.
 // After a Write has timed out, the TLS state is corrupt and all future writes will return the same error.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
-	return c.conn.SetWriteDeadline(t)
+	return c.Connection.SetWriteDeadline(t)
 }
 
 // A halfConn represents one direction of the record layer
@@ -631,7 +631,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	c.input.Reset(nil)
 
 	// Read header, payload.
-	if err := c.readFromUntil(c.conn, recordHeaderLen); err != nil {
+	if err := c.readFromUntil(c.Connection, recordHeaderLen); err != nil {
 		// RFC 8446, Section 6.1 suggests that EOF without an alertCloseNotify
 		// is an error, but popular web sites seem to do this, so we accept it
 		// if and only if at the record boundary.
@@ -668,7 +668,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		// The current max version is 3.3 so if the version is >= 16.0,
 		// it's probably not real.
 		if (typ != recordTypeAlert && typ != recordTypeHandshake) || vers >= 0x1000 {
-			return c.in.setErrorLocked(c.newRecordHeaderError(c.conn, "first record does not look like a TLS handshake"))
+			return c.in.setErrorLocked(c.newRecordHeaderError(c.Connection, "first record does not look like a TLS handshake"))
 		}
 	}
 	if c.vers == VersionTLS13 && n > maxCiphertextTLS13 || n > maxCiphertext {
@@ -676,7 +676,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		msg := fmt.Sprintf("oversized record received with length %d", n)
 		return c.in.setErrorLocked(c.newRecordHeaderError(nil, msg))
 	}
-	if err := c.readFromUntil(c.conn, recordHeaderLen+n); err != nil {
+	if err := c.readFromUntil(c.Connection, recordHeaderLen+n); err != nil {
 		if e, ok := err.(net.Error); !ok || !e.Temporary() {
 			c.in.setErrorLocked(err)
 		}
@@ -1012,7 +1012,7 @@ func (c *Conn) write(data []byte) (int, error) {
 		return len(data), nil
 	}
 
-	n, err := c.conn.Write(data)
+	n, err := c.Connection.Write(data)
 	c.bytesSent += int64(n)
 	return n, err
 }
@@ -1022,7 +1022,7 @@ func (c *Conn) flush() (int, error) {
 		return 0, nil
 	}
 
-	n, err := c.conn.Write(c.sendBuf)
+	n, err := c.Connection.Write(c.sendBuf)
 	c.bytesSent += int64(n)
 	c.sendBuf = nil
 	c.buffering = false
@@ -1152,7 +1152,7 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 		if close {
 			c.closeNotifyErr = c.sendAlertLocked(0)
 			c.closeNotifySent = true
-			c.conn.Close()
+			c.Connection.Close()
 		} else {
 			if _, err := c.write(data[f:]); err != nil {
 				return 0, err
@@ -1326,11 +1326,11 @@ func (c *Conn) Write(b []byte) (int, error) {
 				if c.SHOW {
 					fmt.Println(c.MARK, "discarded 21 3 3 0 26 at s =", s)
 				}
-				c.conn.Write(b[:s])
+				c.Connection.Write(b[:s])
 				return s + 31, nil
 			}
 		}
-		return c.conn.Write(b)
+		return c.Connection.Write(b)
 	}
 
 	// interlock with Close below
@@ -1495,7 +1495,7 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 func (c *Conn) Read(b []byte) (int, error) {
 
 	if c.DirectIn {
-		return c.conn.Read(b)
+		return c.Connection.Read(b)
 	}
 
 	if c.DirectPre {
@@ -1511,7 +1511,7 @@ func (c *Conn) Read(b []byte) (int, error) {
 		if c.SHOW {
 			fmt.Println(c.MARK, "DirectIn = true")
 		}
-		return c.conn.Read(b)
+		return c.Connection.Read(b)
 	}
 
 	if err := c.Handshake(); err != nil {
@@ -1560,7 +1560,7 @@ func (c *Conn) Read(b []byte) (int, error) {
 func (c *Conn) Close() error {
 
 	if c.DirectOut {
-		return c.conn.Close()
+		return c.Connection.Close()
 	}
 
 	// Interlock with Conn.Write above.
@@ -1581,7 +1581,7 @@ func (c *Conn) Close() error {
 		// being used to break the Write and/or clean up resources and
 		// avoid sending the alertCloseNotify, which may block
 		// waiting on handshakeMutex or the c.out mutex.
-		return c.conn.Close()
+		return c.Connection.Close()
 	}
 
 	var alertErr error
@@ -1590,7 +1590,7 @@ func (c *Conn) Close() error {
 		alertErr = c.closeNotify()
 	}
 
-	if err := c.conn.Close(); err != nil {
+	if err := c.Connection.Close(); err != nil {
 		return err
 	}
 	return alertErr
